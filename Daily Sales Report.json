@@ -1,0 +1,188 @@
+{
+  "name": "Daily Sales Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            },
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "3fee3d83-3b2a-467a-9d89-51fa77233e07",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Daily sales report: yesterday vs. the day before.\n-- Returns ONE row. Paste this into the n8n Postgres node (\"Execute Query\").\n-- Cancelled orders are not counted as sales.\n\nWITH sales AS (\n    SELECT\n        o.order_date::date        AS day,\n        o.id                      AS order_id,\n        o.city,\n        p.name                    AS product,\n        p.category,\n        oi.quantity,\n        oi.quantity * oi.unit_price AS revenue\n    FROM orders o\n    JOIN order_items oi ON oi.order_id = o.id\n    JOIN products p     ON p.id = oi.product_id\n    WHERE o.status <> 'cancelled'\n      AND o.order_date::date IN (current_date - 1, current_date - 2)\n),\ntotals AS (\n    SELECT\n        COALESCE(SUM(revenue)          FILTER (WHERE day = current_date - 1), 0) AS revenue_yesterday,\n        COALESCE(SUM(revenue)          FILTER (WHERE day = current_date - 2), 0) AS revenue_day_before,\n        COUNT(DISTINCT order_id)       FILTER (WHERE day = current_date - 1)     AS orders_yesterday,\n        COUNT(DISTINCT order_id)       FILTER (WHERE day = current_date - 2)     AS orders_day_before\n    FROM sales\n),\ntop_products AS (\n    SELECT json_agg(t ORDER BY t.revenue DESC) AS list\n    FROM (\n        SELECT product, SUM(quantity) AS units, SUM(revenue) AS revenue\n        FROM sales WHERE day = current_date - 1\n        GROUP BY product\n        ORDER BY revenue DESC\n        LIMIT 5\n    ) t\n),\nby_category AS (\n    SELECT json_agg(t ORDER BY t.revenue DESC) AS list\n    FROM (\n        SELECT category, SUM(revenue) AS revenue\n        FROM sales WHERE day = current_date - 1\n        GROUP BY category\n    ) t\n),\nby_city AS (\n    SELECT json_agg(t ORDER BY t.orders DESC) AS list\n    FROM (\n        SELECT city, COUNT(DISTINCT order_id) AS orders\n        FROM sales WHERE day = current_date - 1\n        GROUP BY city\n    ) t\n),\ncancelled AS (\n    SELECT COUNT(*) AS cancelled_yesterday\n    FROM orders\n    WHERE status = 'cancelled' AND order_date::date = current_date - 1\n)\nSELECT\n    to_char(current_date - 1, 'DD Mon YYYY')                      AS report_date,\n    t.revenue_yesterday,\n    t.revenue_day_before,\n    CASE WHEN t.revenue_day_before = 0 THEN NULL\n         ELSE ROUND((t.revenue_yesterday - t.revenue_day_before) * 100.0 / t.revenue_day_before, 1)\n    END                                                           AS revenue_change_pct,\n    t.orders_yesterday,\n    t.orders_day_before,\n    CASE WHEN t.orders_yesterday = 0 THEN 0\n         ELSE ROUND(t.revenue_yesterday / t.orders_yesterday, 0)\n    END                                                           AS avg_order_value,\n    c.cancelled_yesterday,\n    tp.list AS top_products,\n    bc.list AS by_category,\n    bci.list AS by_city\nFROM totals t, top_products tp, by_category bc, by_city bci, cancelled c;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        224,
+        0
+      ],
+      "id": "a552ce8b-1b33-4b77-b72a-db15cac9ca3a",
+      "name": "Sales Data",
+      "credentials": {
+        "postgres": {
+          "id": "nZPueSHPtv59NVUB",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a business analyst. Below is yesterday's sales data for an\nonline shop in Bangladesh (amounts in BDT). Write exactly 3 short lines:\n1) overall result vs the day before, 2) the best product or category,\n3) one thing to watch or act on. Use only these numbers; do not invent\nanything. No greeting.\n\nData: {{ JSON.stringify($json) }}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        448,
+        0
+      ],
+      "id": "3083e037-ebf5-4d0b-b4a2-54bb090be63f",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        384,
+        208
+      ],
+      "id": "b9cbbcad-c6c2-468a-a78e-fce365fe0a15",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "si21cZlT0vGVp8V3",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node (\"Run Once for All Items\"), placed AFTER the AI summary node.\n// It reads the numbers from the Postgres node (named \"Sales Data\")\n// and the AI text from the previous node, then builds the email.\n\nconst d = $('Sales Data').first().json;\nconst aiSummary = ($input.first().json.text || '').trim();\n\nconst taka = (n) => '৳' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });\nconst change = d.revenue_change_pct === null ? null : Number(d.revenue_change_pct);\nconst arrow = change === null ? '–' : change >= 0 ? `▲ ${change}%` : `▼ ${Math.abs(change)}%`;\nconst arrowColor = change === null ? '#666' : change >= 0 ? '#1a7f37' : '#c62828';\n\nconst rows = (list, cells) =>\n  (list || []).map((r) => `<tr>${cells(r).map((c) => `<td style=\"padding:6px 10px;border-bottom:1px solid #eee\">${c}</td>`).join('')}</tr>`).join('');\n\nconst table = (headers, body) => `\n  <table style=\"border-collapse:collapse;width:100%;font-size:14px;margin:8px 0 20px\">\n    <tr>${headers.map((h) => `<th style=\"text-align:left;padding:6px 10px;background:#f4f6f8\">${h}</th>`).join('')}</tr>\n    ${body}\n  </table>`;\n\nconst html = `\n<div style=\"font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#222\">\n  <h2 style=\"margin-bottom:4px\">Daily Sales Report</h2>\n  <div style=\"color:#666;margin-bottom:16px\">${d.report_date}</div>\n\n  <div style=\"background:#f4f6f8;border-radius:8px;padding:14px 16px;margin-bottom:20px\">\n    <b>Summary</b><br>${aiSummary.replace(/\\n/g, '<br>')}\n  </div>\n\n  <table style=\"width:100%;margin-bottom:20px;font-size:14px\">\n    <tr>\n      <td><div style=\"color:#666\">Revenue</div><div style=\"font-size:22px\"><b>${taka(d.revenue_yesterday)}</b></div>\n          <div style=\"color:${arrowColor}\">${arrow} vs day before</div></td>\n      <td><div style=\"color:#666\">Orders</div><div style=\"font-size:22px\"><b>${d.orders_yesterday}</b></div>\n          <div style=\"color:#666\">day before: ${d.orders_day_before}</div></td>\n      <td><div style=\"color:#666\">Avg. order</div><div style=\"font-size:22px\"><b>${taka(d.avg_order_value)}</b></div>\n          <div style=\"color:#666\">cancelled: ${d.cancelled_yesterday}</div></td>\n    </tr>\n  </table>\n\n  <h3>Top products</h3>\n  ${table(['Product', 'Units', 'Revenue'], rows(d.top_products, (r) => [r.product, r.units, taka(r.revenue)]))}\n\n  <h3>By category</h3>\n  ${table(['Category', 'Revenue'], rows(d.by_category, (r) => [r.category, taka(r.revenue)]))}\n\n  <h3>Orders by city</h3>\n  ${table(['City', 'Orders'], rows(d.by_city, (r) => [r.city, r.orders]))}\n\n  <div style=\"color:#999;font-size:12px\">Sent automatically by n8n.</div>\n</div>`;\n\nreturn [{\n  json: {\n    subject: `Sales report ${d.report_date}: ${taka(d.revenue_yesterday)} (${arrow})`,\n    html,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        0
+      ],
+      "id": "75c0cb89-8fdd-4838-9bd6-6318f3f5cb71",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "fromEmail": "you@example.com",
+        "toEmail": "you@example.com",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "6341966b-d6fd-4f01-b958-c74c3ddf484d",
+      "name": "Send an Email",
+      "webhookId": "3d84f428-d212-4315-b15d-e6a9152abe4d",
+      "credentials": {
+        "smtp": {
+          "id": "pbjj1lHXly7lm6Rm",
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sales Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sales Data": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Send an Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9e255ce9-a754-4501-a77b-9128f50304a6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "631d2d520c22ad9e9e472d53e02cdf22e205b5fc56656c779f3fce74cefecb90"
+  },
+  "nodeGroups": [],
+  "id": "Er7aJdpBMGI8iKIr",
+  "tags": []
+}
