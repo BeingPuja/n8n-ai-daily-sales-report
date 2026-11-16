@@ -2,7 +2,7 @@
 
 Every morning at 9 AM, this workflow reads yesterday's sales from a database, has AI write a 3-line business summary, and emails the owner a clean, ready-to-read report — with no manual work.
 
-![Workflow](screenshots/workflow.png.jpeg)
+![Workflow](screenshots/workflow.png)
 
 ## The problem
 
@@ -16,7 +16,7 @@ Small business owners spend 20–30 minutes every day pulling numbers from their
 4. **Writes an AI summary** (Google Gemini): the overall result, the best performer and one thing to act on — using only the real numbers
 5. **Emails a formatted HTML report** to the owner
 
-![Email report](screenshots/email.png.jpeg)
+![Email report](screenshots/email.png)
 
 ## Tech stack
 
